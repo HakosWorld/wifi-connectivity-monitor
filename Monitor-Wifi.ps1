@@ -26,6 +26,8 @@ try {
     New-Item -ItemType Directory -Path $DataDirectory -Force | Out-Null
     $minuteDirectory = Join-Path $DataDirectory 'minute-stats'
     New-Item -ItemType Directory -Path $minuteDirectory -Force | Out-Null
+    $packetLossDirectory = Join-Path $DataDirectory 'packet-loss'
+    New-Item -ItemType Directory -Path $packetLossDirectory -Force | Out-Null
 
     $statusPath = Join-Path $DataDirectory 'status.json'
     $stopRequestPath = Join-Path $DataDirectory 'stop.request.json'
@@ -340,6 +342,41 @@ try {
         })
     }
 
+    function Write-PacketLossSummary {
+        param($Accumulator)
+
+        if ($null -eq $Accumulator -or $Accumulator.Samples -eq 0) {
+            return
+        }
+
+        $targetStats = @($Accumulator.TargetAttempts.Keys | Sort-Object | ForEach-Object {
+            $target = [string]$_
+            $attempts = [int64]$Accumulator.TargetAttempts[$target]
+            $failures = [int64]$Accumulator.TargetFailures[$target]
+            [ordered]@{
+                Target      = $target
+                Attempts    = $attempts
+                Failures    = $failures
+                LossPercent = if ($attempts -gt 0) { [math]::Round(($failures * 100.0) / $attempts, 3) } else { $null }
+            }
+        })
+
+        $dayPath = Join-Path $packetLossDirectory ("packet-loss-{0}.csv" -f $Accumulator.MinuteStart.ToString('yyyy-MM-dd'))
+        Write-CsvRow -Path $dayPath -InputObject ([pscustomobject]@{
+            MinuteStartLocal             = $Accumulator.MinuteStart.ToString('o')
+            MinuteStartUtc               = $Accumulator.MinuteStart.UtcDateTime.ToString('o')
+            Samples                      = $Accumulator.Samples
+            InternetProbeAttempts        = $Accumulator.InternetAttempts
+            InternetProbeFailures        = $Accumulator.InternetFailures
+            InternetProbeLossPercent     = if ($Accumulator.InternetAttempts -gt 0) { [math]::Round(($Accumulator.InternetFailures * 100.0) / $Accumulator.InternetAttempts, 3) } else { $null }
+            GatewayProbeAttempts         = $Accumulator.GatewayAttempts
+            GatewayProbeFailures         = $Accumulator.GatewayFailures
+            GatewayProbeLossPercent      = if ($Accumulator.GatewayAttempts -gt 0) { [math]::Round(($Accumulator.GatewayFailures * 100.0) / $Accumulator.GatewayAttempts, 3) } else { $null }
+            CompleteInternetFailureChecks = $Accumulator.CompleteInternetFailures
+            TargetStatsJson              = $targetStats | ConvertTo-Json -Depth 4 -Compress
+        })
+    }
+
     function New-MinuteAccumulator {
         param([DateTimeOffset]$Timestamp)
 
@@ -348,15 +385,25 @@ try {
             $Timestamp.Hour, $Timestamp.Minute, 0, $Timestamp.Offset
         )
         return [pscustomobject]@{
-            MinuteStart = $minute
-            Samples     = 0
-            Failures    = 0
-            Latencies   = New-Object System.Collections.Generic.List[long]
+            MinuteStart             = $minute
+            Samples                 = 0
+            Failures                = 0
+            Latencies               = New-Object System.Collections.Generic.List[long]
+            InternetAttempts        = 0
+            InternetFailures        = 0
+            GatewayAttempts         = 0
+            GatewayFailures         = 0
+            CompleteInternetFailures = 0
+            TargetAttempts          = @{}
+            TargetFailures          = @{}
         }
     }
 
     # Retain detailed minute aggregates for 90 days. Outage events are retained indefinitely.
     Get-ChildItem -LiteralPath $minuteDirectory -Filter 'minute-stats-*.csv' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-100) } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $packetLossDirectory -Filter 'packet-loss-*.csv' -File -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-100) } |
         Remove-Item -Force -ErrorAction SilentlyContinue
 
@@ -392,6 +439,8 @@ try {
                         Remove-Item -LiteralPath $eventPath -Force -ErrorAction Stop
                     }
                     Get-ChildItem -LiteralPath $minuteDirectory -Filter 'minute-stats-*.csv' -File -ErrorAction SilentlyContinue |
+                        Remove-Item -Force -ErrorAction Stop
+                    Get-ChildItem -LiteralPath $packetLossDirectory -Filter 'packet-loss-*.csv' -File -ErrorAction SilentlyContinue |
                         Remove-Item -Force -ErrorAction Stop
                     Write-JsonAtomic -Path $resetCompletedPath -InputObject ([pscustomobject]@{
                         RequestId = [string]$resetRequest.RequestId
@@ -451,6 +500,7 @@ try {
         $sampleMinute = [DateTimeOffset]::new($now.Year, $now.Month, $now.Day, $now.Hour, $now.Minute, 0, $now.Offset)
         if ($sampleMinute -ne $minuteAccumulator.MinuteStart) {
             Write-MinuteSummary -Accumulator $minuteAccumulator
+            Write-PacketLossSummary -Accumulator $minuteAccumulator
             $minuteAccumulator = New-MinuteAccumulator -Timestamp $now
         }
         $minuteAccumulator.Samples++
@@ -459,6 +509,27 @@ try {
         }
         if ($null -ne $bestLatency) {
             $minuteAccumulator.Latencies.Add($bestLatency)
+        }
+        $minuteAccumulator.InternetAttempts += $InternetTargets.Count
+        $minuteAccumulator.InternetFailures += $failedInternetCount
+        if ($failedInternetCount -eq $InternetTargets.Count) {
+            $minuteAccumulator.CompleteInternetFailures++
+        }
+        for ($targetIndex = 0; $targetIndex -lt $InternetTargets.Count; $targetIndex++) {
+            $target = [string]$InternetTargets[$targetIndex]
+            if (-not $minuteAccumulator.TargetAttempts.ContainsKey($target)) {
+                $minuteAccumulator.TargetAttempts[$target] = 0
+                $minuteAccumulator.TargetFailures[$target] = 0
+            }
+            $minuteAccumulator.TargetAttempts[$target]++
+            $targetResult = $internetResults[$targetIndex]
+            if ($null -eq $targetResult -or -not $targetResult.Success) {
+                $minuteAccumulator.TargetFailures[$target]++
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($context.Gateway)) {
+            $minuteAccumulator.GatewayAttempts++
+            if (-not $gatewaySucceeded) { $minuteAccumulator.GatewayFailures++ }
         }
 
         if ($issueDetected -and $null -eq $currentOutage) {
@@ -629,6 +700,7 @@ try {
     }
 
     Write-MinuteSummary -Accumulator $minuteAccumulator
+    Write-PacketLossSummary -Accumulator $minuteAccumulator
 }
 finally {
     try {

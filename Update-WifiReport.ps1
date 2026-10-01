@@ -71,6 +71,7 @@ try {
     $resetRequestPath = Join-Path $DataDirectory 'reset.request.json'
     $resetCompletedPath = Join-Path $DataDirectory 'reset.completed.json'
     $minuteDirectory = Join-Path $DataDirectory 'minute-stats'
+    $packetLossDirectory = Join-Path $DataDirectory 'packet-loss'
     $dashboardPath = Join-Path $PSScriptRoot 'dashboard.html'
 
     if (-not (Test-Path -LiteralPath $dashboardPath)) { throw "Dashboard file not found: $dashboardPath" }
@@ -114,6 +115,7 @@ try {
     $serverInfo | ConvertTo-Json | Set-Content -LiteralPath $serverInfoPath -Encoding UTF8
 
     $cachedMinutePoints = @()
+    $cachedPacketLossPoints = @()
     $cachedCompletedOutages = @()
     $cachedBaseSummaries = @{}
     $lastEventStamp = -1L
@@ -151,6 +153,7 @@ try {
                     if ($completed.RequestId -eq $requestId) {
                         Remove-Item -LiteralPath $resetCompletedPath -Force -ErrorAction SilentlyContinue
                         $script:cachedMinutePoints = @()
+                        $script:cachedPacketLossPoints = @()
                         $script:cachedCompletedOutages = @()
                         $script:cachedBaseSummaries = @{}
                         $script:lastEventStamp = -1L
@@ -224,6 +227,28 @@ try {
                     }
                 }
                 $script:cachedMinutePoints = @($points | Sort-Object Time)
+
+                $packetLossPoints = @()
+                if (Test-Path -LiteralPath $packetLossDirectory) {
+                    $files = @(Get-ChildItem -LiteralPath $packetLossDirectory -Filter 'packet-loss-*.csv' -File | Where-Object { $_.LastWriteTime -ge $cutoff })
+                    foreach ($file in $files) {
+                        foreach ($row in @(Import-Csv -LiteralPath $file.FullName)) {
+                            $packetLossPoints += [pscustomobject]@{
+                                Time                     = [DateTimeOffset]::Parse($row.MinuteStartUtc)
+                                TimeUtc                  = $row.MinuteStartUtc
+                                InternetAttempts         = [int64]$row.InternetProbeAttempts
+                                InternetFailures         = [int64]$row.InternetProbeFailures
+                                InternetLossPercent      = Convert-ToNullableDouble $row.InternetProbeLossPercent
+                                GatewayAttempts          = [int64]$row.GatewayProbeAttempts
+                                GatewayFailures          = [int64]$row.GatewayProbeFailures
+                                GatewayLossPercent       = Convert-ToNullableDouble $row.GatewayProbeLossPercent
+                                CompleteInternetFailures = [int64]$row.CompleteInternetFailureChecks
+                                TargetStatsJson          = [string]$row.TargetStatsJson
+                            }
+                        }
+                    }
+                }
+                $script:cachedPacketLossPoints = @($packetLossPoints | Sort-Object Time)
                 $script:nextStatsRefresh = $now.AddSeconds(30)
             }
             catch { $script:nextStatsRefresh = $now.AddSeconds(5) }
@@ -231,6 +256,7 @@ try {
 
         $summaries = @{}
         foreach ($period in @(
+            [pscustomobject]@{ Key = '15m'; Since = $now.AddMinutes(-15) },
             [pscustomobject]@{ Key = '24h'; Since = $now.AddHours(-24) },
             [pscustomobject]@{ Key = '7d'; Since = $now.AddDays(-7) },
             [pscustomobject]@{ Key = '30d'; Since = $now.AddDays(-30) }
@@ -241,6 +267,41 @@ try {
                 $samples += $point.Samples
                 $failures += $point.Failures
             }
+            $internetAttempts = 0L
+            $internetFailures = 0L
+            $gatewayAttempts = 0L
+            $gatewayFailures = 0L
+            $completeInternetFailures = 0L
+            $targetTotals = @{}
+            foreach ($point in @($script:cachedPacketLossPoints | Where-Object { $_.Time -ge $period.Since })) {
+                $internetAttempts += $point.InternetAttempts
+                $internetFailures += $point.InternetFailures
+                $gatewayAttempts += $point.GatewayAttempts
+                $gatewayFailures += $point.GatewayFailures
+                $completeInternetFailures += $point.CompleteInternetFailures
+                $pointTargetStats = @()
+                if (-not [string]::IsNullOrWhiteSpace($point.TargetStatsJson)) {
+                    try { $pointTargetStats = @($point.TargetStatsJson | ConvertFrom-Json | ForEach-Object { $_ }) }
+                    catch { $pointTargetStats = @() }
+                }
+                foreach ($targetStat in $pointTargetStats) {
+                    if (-not $targetTotals.ContainsKey($targetStat.Target)) {
+                        $targetTotals[$targetStat.Target] = [pscustomobject]@{ Attempts = 0L; Failures = 0L }
+                    }
+                    $targetTotals[$targetStat.Target].Attempts += $targetStat.Attempts
+                    $targetTotals[$targetStat.Target].Failures += $targetStat.Failures
+                }
+            }
+            $targetLoss = @($targetTotals.Keys | Sort-Object | ForEach-Object {
+                $target = [string]$_
+                $total = $targetTotals[$target]
+                [pscustomobject]@{
+                    Target      = $target
+                    Attempts    = $total.Attempts
+                    Failures    = $total.Failures
+                    LossPercent = if ($total.Attempts -gt 0) { [math]::Round(($total.Failures * 100.0) / $total.Attempts, 3) } else { $null }
+                }
+            })
             $downtime = 0.0
             $affectedTime = 0.0
             $eventCount = 0
@@ -289,6 +350,14 @@ try {
                 NoiseCount      = $noiseCount
                 DowntimeSeconds = [math]::Round($downtime, 3)
                 AffectedSeconds = [math]::Round($affectedTime, 3)
+                InternetProbeAttempts = $internetAttempts
+                InternetProbeFailures = $internetFailures
+                InternetProbeLossPercent = if ($internetAttempts -gt 0) { [math]::Round(($internetFailures * 100.0) / $internetAttempts, 3) } else { $null }
+                GatewayProbeAttempts = $gatewayAttempts
+                GatewayProbeFailures = $gatewayFailures
+                GatewayProbeLossPercent = if ($gatewayAttempts -gt 0) { [math]::Round(($gatewayFailures * 100.0) / $gatewayAttempts, 3) } else { $null }
+                CompleteInternetFailureChecks = $completeInternetFailures
+                TargetLoss       = $targetLoss
             }
         }
         $script:cachedBaseSummaries = $summaries
@@ -343,6 +412,7 @@ try {
 
         $summaries = @{}
         foreach ($period in @(
+            [pscustomobject]@{ Key = '15m'; Since = $now.AddMinutes(-15) },
             [pscustomobject]@{ Key = '24h'; Since = $now.AddHours(-24) },
             [pscustomobject]@{ Key = '7d'; Since = $now.AddDays(-7) },
             [pscustomobject]@{ Key = '30d'; Since = $now.AddDays(-30) }
@@ -361,6 +431,14 @@ try {
                 NoiseCount      = if ($null -ne $base) { $base.NoiseCount } else { 0 }
                 DowntimeSeconds = if ($null -ne $base) { $base.DowntimeSeconds } else { 0 }
                 AffectedSeconds = if ($null -ne $base) { $base.AffectedSeconds } else { 0 }
+                InternetProbeAttempts = if ($null -ne $base) { $base.InternetProbeAttempts } else { 0 }
+                InternetProbeFailures = if ($null -ne $base) { $base.InternetProbeFailures } else { 0 }
+                InternetProbeLossPercent = if ($null -ne $base) { $base.InternetProbeLossPercent } else { $null }
+                GatewayProbeAttempts = if ($null -ne $base) { $base.GatewayProbeAttempts } else { 0 }
+                GatewayProbeFailures = if ($null -ne $base) { $base.GatewayProbeFailures } else { 0 }
+                GatewayProbeLossPercent = if ($null -ne $base) { $base.GatewayProbeLossPercent } else { $null }
+                CompleteInternetFailureChecks = if ($null -ne $base) { $base.CompleteInternetFailureChecks } else { 0 }
+                TargetLoss       = if ($null -ne $base) { $base.TargetLoss } else { @() }
             }
             if ($null -ne $activeOutage) {
                 $activeStart = [DateTimeOffset]::Parse($activeOutage.StartUtc)
@@ -405,6 +483,13 @@ try {
                 FailurePct = $_.FailurePct
             }
         })
+        $packetLossSeries = @($script:cachedPacketLossPoints | Where-Object { $_.Time -ge $latencyCutoff } | ForEach-Object {
+            [pscustomobject]@{
+                TimeUtc             = $_.TimeUtc
+                InternetLossPercent = $_.InternetLossPercent
+                GatewayLossPercent  = $_.GatewayLossPercent
+            }
+        })
 
         return [pscustomobject]@{
             ServerNowUtc  = $now.ToString('o')
@@ -416,6 +501,7 @@ try {
             Outages       = $history
             Timeline      = $timeline
             LatencySeries = $latencySeries
+            PacketLossSeries = $packetLossSeries
         }
     }
 

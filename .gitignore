@@ -2,6 +2,7 @@
 data/
 bin/
 minute-stats/
+packet-loss/
 *.log
 *.tmp
 status.json

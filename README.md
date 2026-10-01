@@ -8,6 +8,7 @@ Run this Windows monitor 24/7. It checks the connection twice per second and kee
 
 - Detects drops as short as one second.
 - Checks three public targets and the local router in parallel.
+- Tracks public-target and router packet loss by minute, target, and time range.
 - Uses TCP confirmation before calling an outage an ISP failure.
 - Separates probe noise, local Wi-Fi/router failures, and upstream outages.
 - Shows live status, history, latency, and the connected Wi-Fi name.
@@ -34,3 +35,5 @@ Phones and computers on the same local network can use the LAN URL printed when 
 - **Confirmed upstream outage:** the router responds while all public ICMP probes and both TCP confirmations fail.
 
 The reset button clears saved history without stopping the monitor. Its password stays in the local data directory and is never stored in the repository.
+
+Packet-loss percentages measure unanswered ICMP probes. They are useful evidence, but a public target can rate-limit ping without affecting normal traffic, so confirmed outages still require multiple ICMP and TCP failures.

@@ -32,6 +32,7 @@ foreach ($elementId in @(
     'wifiName',
     'timelineCanvas',
     'latencyCanvas',
+    'lossCanvas',
     'outageRows',
     'openReset',
     'resetDialog',
@@ -58,6 +59,9 @@ if (-not $serverScript.Contains('[System.Net.IPAddress]::Any')) {
 }
 if (-not $serverScript.Contains('LanUrl')) {
     Add-Failure 'Update-WifiReport.ps1 does not publish the LAN dashboard URL.'
+}
+if (-not $serverScript.Contains('PacketLossSeries')) {
+    Add-Failure 'Update-WifiReport.ps1 does not publish packet-loss history.'
 }
 if ($serverScript -match '\[string\]\$ResetPassword\s*=') {
     Add-Failure 'The reset password must not have a source-controlled default value.'
