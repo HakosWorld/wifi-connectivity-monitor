@@ -34,6 +34,7 @@ foreach ($elementId in @(
     'latencyCanvas',
     'lossCanvas',
     'outageRows',
+    'typeFilter',
     'openReset',
     'resetDialog',
     'resetPassword'
@@ -42,6 +43,10 @@ foreach ($elementId in @(
     if ($count -ne 1) {
         Add-Failure "dashboard.html must contain exactly one '$elementId' element; found $count."
     }
+}
+
+if (-not $dashboard.Contains('Local path noise')) {
+    Add-Failure 'dashboard.html does not classify local-path failures as noise.'
 }
 
 foreach ($endpoint in @('/api/data', '/api/reset')) {
