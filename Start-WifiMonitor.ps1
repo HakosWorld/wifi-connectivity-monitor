@@ -63,6 +63,9 @@ if ($null -ne $serverInfo) {
 
     if (-not $NoBrowser) { Start-Process -FilePath $serverInfo.Url }
     Write-Output "Wi-Fi monitor is running in the background. Live dashboard: $($serverInfo.Url)"
+    if ($null -ne $serverInfo.PSObject.Properties['LanUrl'] -and -not [string]::IsNullOrWhiteSpace([string]$serverInfo.LanUrl)) {
+        Write-Output "LAN dashboard: $($serverInfo.LanUrl)"
+    }
 
     $shareInfoPath = Join-Path $DataDirectory 'public-share.json'
     $shareDeadline = (Get-Date).AddSeconds(50)

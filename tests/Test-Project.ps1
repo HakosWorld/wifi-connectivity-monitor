@@ -53,6 +53,12 @@ $serverScript = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'Update-Wi
 if (-not $serverScript.Contains('reset-password.txt')) {
     Add-Failure 'Update-WifiReport.ps1 does not load the reset password from local data.'
 }
+if (-not $serverScript.Contains('[System.Net.IPAddress]::Any')) {
+    Add-Failure 'Update-WifiReport.ps1 is not configured to accept LAN connections.'
+}
+if (-not $serverScript.Contains('LanUrl')) {
+    Add-Failure 'Update-WifiReport.ps1 does not publish the LAN dashboard URL.'
+}
 if ($serverScript -match '\[string\]\$ResetPassword\s*=') {
     Add-Failure 'The reset password must not have a source-controlled default value.'
 }

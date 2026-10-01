@@ -78,7 +78,7 @@ try {
 
     $port = $null
     foreach ($candidatePort in $PreferredPort..([math]::Min($PreferredPort + 10, 65535))) {
-        $candidateListener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $candidatePort)
+        $candidateListener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $candidatePort)
         try {
             $candidateListener.Start()
             $listener = $candidateListener
@@ -89,12 +89,26 @@ try {
     }
     if ($null -eq $listener) { throw "No free dashboard port was available between $PreferredPort and $($PreferredPort + 10)." }
 
+    $lanUrl = $null
+    if (Test-Path -LiteralPath $statusPath) {
+        try {
+            $startupStatus = Get-Content -Raw -LiteralPath $statusPath | ConvertFrom-Json
+            $lanAddress = [string]$startupStatus.LocalAddress
+            $parsedAddress = $null
+            if ([System.Net.IPAddress]::TryParse($lanAddress, [ref]$parsedAddress) -and -not [System.Net.IPAddress]::IsLoopback($parsedAddress)) {
+                $lanUrl = "http://${lanAddress}:$port/"
+            }
+        }
+        catch { $lanUrl = $null }
+    }
+
     $serverInfo = [pscustomobject]@{
         Running    = $true
         ProcessId  = $PID
         InstanceId = $serverInstanceId
         Port        = $port
         Url         = "http://127.0.0.1:$port/"
+        LanUrl      = $lanUrl
         StartedAt   = [DateTimeOffset]::Now.ToString('o')
     }
     $serverInfo | ConvertTo-Json | Set-Content -LiteralPath $serverInfoPath -Encoding UTF8

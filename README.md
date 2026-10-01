@@ -18,11 +18,14 @@ Run this Windows monitor 24/7. It checks the connection twice per second and kee
 
 1. Download or clone the repository on a Windows PC.
 2. Run **Set Dashboard Password.cmd** once.
-3. Run **Start WiFi Monitor.cmd**.
+3. Run **Enable LAN Access.cmd** once and approve the Windows administrator prompt.
+4. Run **Start WiFi Monitor.cmd**.
 
 Use **Open WiFi Dashboard.cmd** to reopen the dashboard and **Stop WiFi Monitor.cmd** to stop it. Run **Enable Start at Login.cmd** once if the monitor should start automatically with Windows.
 
 The public URL is temporary and changes when the Cloudflare tunnel restarts. The local dashboard continues collecting data during an internet outage.
+
+Phones and computers on the same local network can use the LAN URL printed when the monitor starts, such as `http://192.168.1.20:8765/`. The firewall rule accepts traffic only from the local subnet. Run **Disable LAN Access.cmd** to remove it.
 
 ## How outages are classified
 
