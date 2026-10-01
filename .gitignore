@@ -1,0 +1,12 @@
+# Runtime state is stored outside the repository, but ignore local copies too.
+data/
+bin/
+minute-stats/
+*.log
+*.tmp
+status.json
+dashboard-server.json
+public-share.json
+reset-password.txt
+outage-events.csv
+wifi-report.html
