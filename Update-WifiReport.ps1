@@ -118,7 +118,10 @@ try {
     $cachedPacketLossPoints = @()
     $cachedCompletedOutages = @()
     $cachedBaseSummaries = @{}
+    $cachedPayloadJson = $null
     $lastEventStamp = -1L
+    $nextEventRefresh = [DateTimeOffset]::MinValue
+    $nextPayloadRefresh = [DateTimeOffset]::MinValue
     $nextStatsRefresh = [DateTimeOffset]::MinValue
     $failedResetAttempts = @{}
 
@@ -156,7 +159,10 @@ try {
                         $script:cachedPacketLossPoints = @()
                         $script:cachedCompletedOutages = @()
                         $script:cachedBaseSummaries = @{}
+                        $script:cachedPayloadJson = $null
                         $script:lastEventStamp = -1L
+                        $script:nextEventRefresh = [DateTimeOffset]::MinValue
+                        $script:nextPayloadRefresh = [DateTimeOffset]::MinValue
                         $script:nextStatsRefresh = [DateTimeOffset]::MinValue
                         Refresh-DashboardCache -Force $true
                         return [pscustomobject]@{ StatusCode = 200; Body = '{"ok":true,"message":"History reset. Monitoring continues from now."}' }
@@ -175,10 +181,11 @@ try {
         $now = [DateTimeOffset]::UtcNow
         $eventStamp = if (Test-Path -LiteralPath $eventPath) { (Get-Item -LiteralPath $eventPath).LastWriteTimeUtc.Ticks } else { 0L }
         $eventsChanged = $eventStamp -ne $script:lastEventStamp
+        $eventsDue = $Force -or ($eventsChanged -and $now -ge $script:nextEventRefresh)
         $statsDue = $now -ge $script:nextStatsRefresh
-        if (-not $Force -and -not $eventsChanged -and -not $statsDue) { return }
+        if (-not $eventsDue -and -not $statsDue) { return }
 
-        if ($eventsChanged -or $Force) {
+        if ($eventsDue) {
             try {
                 $events = if (Test-Path -LiteralPath $eventPath) { @(Import-Csv -LiteralPath $eventPath) } else { @() }
                 $script:cachedCompletedOutages = @($events | Where-Object { $_.Event -eq 'End' } | ForEach-Object {
@@ -190,6 +197,8 @@ try {
                         Id              = $_.OutageId
                         StartUtc        = $_.StartUtc
                         EndUtc          = $_.EndUtc
+                        StartTime       = [DateTimeOffset]::Parse($_.StartUtc)
+                        EndTime         = [DateTimeOffset]::Parse($_.EndUtc)
                         DurationSeconds = [double]$_.DurationSeconds
                         Severity        = $severity
                         Classification  = $_.Classification
@@ -200,21 +209,22 @@ try {
                         GatewaySuccess  = if ($null -ne $_.PSObject.Properties['GatewaySuccess']) { $_.GatewaySuccess } else { '' }
                         Active          = $false
                     }
-                } | Sort-Object { [DateTimeOffset]::Parse($_.StartUtc) } -Descending)
+                } | Sort-Object StartTime -Descending)
                 $script:lastEventStamp = $eventStamp
+                $script:nextEventRefresh = $now.AddMinutes(1)
             }
-            catch { }
+            catch { $script:nextEventRefresh = $now.AddSeconds(5) }
         }
 
         if ($statsDue -or $Force) {
             try {
                 $cutoff = (Get-Date).AddDays(-31)
-                $points = @()
+                $points = New-Object System.Collections.Generic.List[object]
                 if (Test-Path -LiteralPath $minuteDirectory) {
                     $files = @(Get-ChildItem -LiteralPath $minuteDirectory -Filter 'minute-stats-*.csv' -File | Where-Object { $_.LastWriteTime -ge $cutoff })
                     foreach ($file in $files) {
                         foreach ($row in @(Import-Csv -LiteralPath $file.FullName)) {
-                            $points += [pscustomobject]@{
+                            $points.Add([pscustomobject]@{
                                 Time       = [DateTimeOffset]::Parse($row.MinuteStartUtc)
                                 TimeUtc    = $row.MinuteStartUtc
                                 Samples    = [double]$row.Samples
@@ -222,18 +232,23 @@ try {
                                 FailurePct = [double]$row.FailurePercent
                                 AvgLatency = Convert-ToNullableDouble $row.AverageLatencyMs
                                 MaxLatency = Convert-ToNullableDouble $row.MaximumLatencyMs
-                            }
+                            })
                         }
                     }
                 }
                 $script:cachedMinutePoints = @($points | Sort-Object Time)
 
-                $packetLossPoints = @()
+                $packetLossPoints = New-Object System.Collections.Generic.List[object]
                 if (Test-Path -LiteralPath $packetLossDirectory) {
                     $files = @(Get-ChildItem -LiteralPath $packetLossDirectory -Filter 'packet-loss-*.csv' -File | Where-Object { $_.LastWriteTime -ge $cutoff })
                     foreach ($file in $files) {
                         foreach ($row in @(Import-Csv -LiteralPath $file.FullName)) {
-                            $packetLossPoints += [pscustomobject]@{
+                            $targetStats = @()
+                            if (-not [string]::IsNullOrWhiteSpace([string]$row.TargetStatsJson)) {
+                                try { $targetStats = @($row.TargetStatsJson | ConvertFrom-Json | ForEach-Object { $_ }) }
+                                catch { $targetStats = @() }
+                            }
+                            $packetLossPoints.Add([pscustomobject]@{
                                 Time                     = [DateTimeOffset]::Parse($row.MinuteStartUtc)
                                 TimeUtc                  = $row.MinuteStartUtc
                                 InternetAttempts         = [int64]$row.InternetProbeAttempts
@@ -243,13 +258,13 @@ try {
                                 GatewayFailures          = [int64]$row.GatewayProbeFailures
                                 GatewayLossPercent       = Convert-ToNullableDouble $row.GatewayProbeLossPercent
                                 CompleteInternetFailures = [int64]$row.CompleteInternetFailureChecks
-                                TargetStatsJson          = [string]$row.TargetStatsJson
-                            }
+                                TargetStats              = $targetStats
+                            })
                         }
                     }
                 }
                 $script:cachedPacketLossPoints = @($packetLossPoints | Sort-Object Time)
-                $script:nextStatsRefresh = $now.AddSeconds(30)
+                $script:nextStatsRefresh = $now.AddMinutes(1)
             }
             catch { $script:nextStatsRefresh = $now.AddSeconds(5) }
         }
@@ -279,12 +294,7 @@ try {
                 $gatewayAttempts += $point.GatewayAttempts
                 $gatewayFailures += $point.GatewayFailures
                 $completeInternetFailures += $point.CompleteInternetFailures
-                $pointTargetStats = @()
-                if (-not [string]::IsNullOrWhiteSpace($point.TargetStatsJson)) {
-                    try { $pointTargetStats = @($point.TargetStatsJson | ConvertFrom-Json | ForEach-Object { $_ }) }
-                    catch { $pointTargetStats = @() }
-                }
-                foreach ($targetStat in $pointTargetStats) {
+                foreach ($targetStat in @($point.TargetStats)) {
                     if (-not $targetTotals.ContainsKey($targetStat.Target)) {
                         $targetTotals[$targetStat.Target] = [pscustomobject]@{ Attempts = 0L; Failures = 0L }
                     }
@@ -312,8 +322,8 @@ try {
             $potentialCount = 0
             $noiseCount = 0
             foreach ($outage in $script:cachedCompletedOutages) {
-                $start = [DateTimeOffset]::Parse($outage.StartUtc)
-                $end = [DateTimeOffset]::Parse($outage.EndUtc)
+                $start = $outage.StartTime
+                $end = $outage.EndTime
                 if ($end -gt $period.Since) {
                     $overlapStart = if ($start -gt $period.Since) { $start } else { $period.Since }
                     $overlapSeconds = [math]::Max(0.0, ($end - $overlapStart).TotalSeconds)
@@ -505,6 +515,15 @@ try {
         }
     }
 
+    function Get-DashboardPayloadJson {
+        $now = [DateTimeOffset]::UtcNow
+        if ($null -eq $script:cachedPayloadJson -or $now -ge $script:nextPayloadRefresh) {
+            $script:cachedPayloadJson = (Get-DashboardPayload | ConvertTo-Json -Depth 10 -Compress)
+            $script:nextPayloadRefresh = $now.AddSeconds(1)
+        }
+        return $script:cachedPayloadJson
+    }
+
     Refresh-DashboardCache -Force $true
     $keepRunning = $true
     $lastMonitorCheck = [DateTimeOffset]::MinValue
@@ -552,8 +571,7 @@ try {
                 }
                 elseif ($requestMethod -eq 'GET' -and $requestPath -eq '/api/data') {
                     try {
-                        $payload = Get-DashboardPayload
-                        Write-HttpResponse -Client $client -StatusCode 200 -ContentType 'application/json; charset=utf-8' -Body ($payload | ConvertTo-Json -Depth 10 -Compress)
+                        Write-HttpResponse -Client $client -StatusCode 200 -ContentType 'application/json; charset=utf-8' -Body (Get-DashboardPayloadJson)
                     }
                     catch {
                         Write-HttpResponse -Client $client -StatusCode 500 -ContentType 'application/json; charset=utf-8' -Body '{"error":"Dashboard data is temporarily unavailable."}'

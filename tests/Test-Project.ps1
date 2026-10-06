@@ -48,6 +48,9 @@ foreach ($elementId in @(
 if (-not $dashboard.Contains('Local path noise')) {
     Add-Failure 'dashboard.html does not classify local-path failures as noise.'
 }
+if ($dashboard.Contains('setInterval(poll')) {
+    Add-Failure 'dashboard.html must not start overlapping dashboard data polls.'
+}
 
 foreach ($endpoint in @('/api/data', '/api/reset')) {
     if (-not $dashboard.Contains($endpoint)) {
@@ -67,6 +70,12 @@ if (-not $serverScript.Contains('LanUrl')) {
 }
 if (-not $serverScript.Contains('PacketLossSeries')) {
     Add-Failure 'Update-WifiReport.ps1 does not publish packet-loss history.'
+}
+if (-not $serverScript.Contains('nextEventRefresh')) {
+    Add-Failure 'Update-WifiReport.ps1 does not throttle event-history cache refreshes.'
+}
+if (-not $serverScript.Contains('cachedPayloadJson')) {
+    Add-Failure 'Update-WifiReport.ps1 does not cache the serialized dashboard payload.'
 }
 if ($serverScript -match '\[string\]\$ResetPassword\s*=') {
     Add-Failure 'The reset password must not have a source-controlled default value.'
